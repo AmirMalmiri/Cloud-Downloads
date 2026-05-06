@@ -1,0 +1,136 @@
+name: 'Shade Version'
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'URL of the file to download'
+        required: true
+        type: string
+      folder_name:
+        description: 'Name of the folder to store the downloaded file'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.folder_name }}
+  cancel-in-progress: true
+
+jobs:
+  leech:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout (sparse, fast)
+        uses: actions/checkout@v3
+        with:
+          sparse-checkout: .github
+          fetch-depth: 0
+
+      - name: Cache apt packages
+        uses: actions/cache@v3
+        id: apt-cache
+        with:
+          path: /var/cache/apt
+          key: ${{ runner.os }}-apt-${{ github.sha }}
+
+      - name: Fast install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y aria2 zip coreutils
+          sudo apt-get clean
+
+      - name: Process File
+        env:
+          FILE_URL: ${{ inputs.file_url }}
+          FOLDER_INPUT: ${{ inputs.folder_name }}
+          CHUNK_SIZE: "95M" # Defaulted to 95MB
+          SAFE_MODE: "true" # Always true
+        run: |
+          # Sanitize and truncate FOLDER_INPUT to create FOLDER
+          FOLDER=$(echo "$FOLDER_INPUT" | sed -E 's/[^a-zA-Z0-9_-]+//g' | cut -c 1-60)
+          echo "Sanitized folder name: $FOLDER"
+          mkdir -p temp_download wrap_dir downloads/$FOLDER
+
+          # Extract and sanitize RAW_NAME and EXT from file_url
+          RAW_NAME=$(basename "$FILE_URL")
+          RAW_NAME_NO_EXT="${RAW_NAME%.*}"
+          EXT="${RAW_NAME##*.}"
+          if [[ "$RAW_NAME" == "$EXT" ]]; then # Handle files with no extension
+            EXT=""
+          fi
+
+          # Determine FINAL_FILE name based on SAFE_MODE
+          if [ "$SAFE_MODE" = "true" ]; then
+            FINAL_FILE="$FOLDER.$EXT"
+          else
+            FINAL_FILE="$RAW_NAME"
+          fi
+          FINAL_FILE=$(echo "$FINAL_FILE" | sed -E 's/[^a-zA-Z0-9._-]+//g') # Sanitize FINAL_FILE
+
+          # Download the file
+          echo "Downloading $FILE_URL to temp_download..."
+          aria2c "$FILE_URL" -x 16 -s 16 -k 1M --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36" --retry-wait=10 --max-tries=10 --timeout=300 -o temp_download
+
+          # Move and rename the downloaded file
+          mv temp_download "wrap_dir/$FINAL_FILE"
+
+          # Compress the FINAL_FILE into a zip archive
+          echo "Compressing $FINAL_FILE into $FOLDER.zip..."
+          cd wrap_dir
+          zip -r "../$FOLDER.zip" "$FINAL_FILE"
+          cd ..
+
+          # Split the $FOLDER.zip into chunks
+          echo "Splitting $FOLDER.zip into chunks of size $CHUNK_SIZE..."
+          split -b "$CHUNK_SIZE" "$FOLDER.zip" "downloads/$FOLDER/chunk_"
+
+      - name: Commit results in batches
+        run: |
+          cd downloads/$FOLDER
+          git add .
+          # Commit in batches
+          BATCH_SIZE=5 # Default batch size
+          COMMIT_COUNT=0
+          CHUNK_FILES=$(ls -1 chunk_* | wc -l)
+
+          if [ $CHUNK_FILES -gt 0 ]; then
+            echo "Committing files in batches..."
+            # Git user configuration removed
+            FILE_LIST=""
+            for file in $(ls -1 chunk_*); do
+              FILE_LIST="$FILE_LIST $file"
+              COUNT=$((COUNT + 1))
+              if [ $COUNT -eq $BATCH_SIZE ] || [ "$file" = "$(ls -1 chunk_* | tail -n 1)" ]; then
+                echo "Committing batch..."
+                git commit -m "Add batch of files ($COMMIT_COUNT)" -- "$FILE_LIST"
+                COMMIT_COUNT=$((COMMIT_COUNT + 1))
+                FILE_LIST=""
+                COUNT=0
+              fi
+            done
+
+            # Simple push with retry (can be enhanced if needed)
+            echo "Pushing to repository..."
+            MAX_RETRIES=5
+            RETRY_DELAY=10
+            for i in $(seq 1 $MAX_RETRIES); do
+              if git push; then
+                echo "Push successful."
+                break
+              else
+                echo "Push failed (Attempt $i/$MAX_RETRIES). Retrying in $RETRY_DELAY seconds..."
+                sleep $RETRY_DELAY
+                if [ $i -eq $MAX_RETRIES ]; then
+                  echo "Push failed after multiple retries."
+                  exit 1
+                fi
+              fi
+            done
+          else
+            echo "No chunks found to commit."
+          fi
