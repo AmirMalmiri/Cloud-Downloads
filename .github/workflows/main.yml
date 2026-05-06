@@ -1,0 +1,27 @@
+name: Clean Up
+
+on:
+  workflow_dispatch:
+
+jobs:
+  delete-folder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          persist-credentials: false
+
+      - name: Remove downloads folder
+        run: |
+          rm -rf downloads
+          
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          
+          git add .
+        
+          git commit -m "Remove downloads folder" || echo "No changes to commit"
+          
+        
+          git push https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:${{ github.ref }}
