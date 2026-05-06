@@ -1,27 +1,39 @@
-name: Clean Up
+name: 🗑 Clean Up
 
 on:
   workflow_dispatch:
+    inputs:
+      warning:
+        description: '⚠️ WARNING: This will DELETE the entire videos/ folder and recreate it. Click "Run workflow" only if you are sure.'
+        required: false
+        default: 'Read this warning before proceeding'
 
 jobs:
-  delete-folder:
+  delete:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          persist-credentials: false
+        uses: actions/checkout@v4
 
-      - name: Remove downloads folder
+      - name: Remove videos folder, recreate it
         run: |
-          rm -rf downloads
-          
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          
-          git add .
-        
-          git commit -m "Remove downloads folder" || echo "No changes to commit"
-          
-        
-          git push https://${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git HEAD:${{ github.ref }}
+          rm -rf downloads 
+          mkdir downloads
+
+      - name: Commit and push changes
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+
+          git add downloads
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "[AVASAM] Clean downloads folder (recreated with README.md) [skip ci]"
+            git pull --rebase origin "${{ github.ref_name }}"
+            git push origin HEAD:"${{ github.ref_name }}"
+            echo "✅ downloads folder cleaned and README.md added"
+          fi
